@@ -11,9 +11,9 @@ venv/
 env/
 
 # Generated monitor outputs
-ollama_gpu_per_model_log.csv
-ollama_gpu_per_model.prom
-ollama_gpu_per_model_snapshot.json
+gpu_monitor_log.csv
+gpu_monitor.prom
+gpu_monitor_snapshot.json
 
 # Local OS/editor files
 .DS_Store

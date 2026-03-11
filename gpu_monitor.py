@@ -14,7 +14,7 @@
 #  ./monitor_ollama_gpu_per_model.py
 #
 #Env overrides:
-#  LOG_FILE=ollama_gpu_per_model_log.csv
+#  LOG_FILE=gpu_monitor_log.csv
 #  INTERVAL_S=1
 #  MONITOR_RUNTIME=ollama
 #  CONTAINER_NAME=ollama
@@ -882,17 +882,17 @@ def parse_args(argv: Optional[List[str]] = None) -> AppConfig:
     runtime_choices = ["ollama", "vllm", "sglang", "localai", "docker-model-runner", "generic"]
     shared.add_argument(
         "--log-file",
-        default=os.environ.get("LOG_FILE", "ollama_gpu_per_model_log.csv"),
+        default=os.environ.get("LOG_FILE", "gpu_monitor_log.csv"),
         help="CSV output path. Env fallback: LOG_FILE.",
     )
     shared.add_argument(
         "--json-file",
-        default=os.environ.get("JSON_FILE", "ollama_gpu_per_model_snapshot.json"),
+        default=os.environ.get("JSON_FILE", "gpu_monitor_snapshot.json"),
         help="JSON snapshot output path. Env fallback: JSON_FILE.",
     )
     shared.add_argument(
         "--prom-file",
-        default=os.environ.get("PROM_FILE", "ollama_gpu_per_model.prom"),
+        default=os.environ.get("PROM_FILE", "gpu_monitor.prom"),
         help="Prometheus text output path. Env fallback: PROM_FILE.",
     )
     shared.add_argument(

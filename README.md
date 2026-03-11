@@ -169,9 +169,9 @@ python3 gpu_monitor.py snapshot \
 
 Default generated files:
 
-- `ollama_gpu_per_model_log.csv`
-- `ollama_gpu_per_model_snapshot.json`
-- `ollama_gpu_per_model.prom`
+- `gpu_monitor_log.csv`
+- `gpu_monitor_snapshot.json`
+- `gpu_monitor.prom`
 
 Extra runtime-aware fields now include:
 

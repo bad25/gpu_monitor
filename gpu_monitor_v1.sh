@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LOG_FILE="${LOG_FILE:-ollama_gpu_per_model_log.csv}"
+LOG_FILE="${LOG_FILE:-gpu_monitor_log.csv}"
 INTERVAL_S="${INTERVAL_S:-1}"
 OLLAMA_CONTAINER="${OLLAMA_CONTAINER:-ollama}"
 

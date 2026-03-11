@@ -15,7 +15,7 @@ set -euo pipefail
 #    ./monitor_ollama_gpu_per_model.sh
 #
 #  Env overrides:
-#    LOG_FILE=ollama_gpu_per_model_log.csv
+#    LOG_FILE=gpu_monitor_log.csv
 #    INTERVAL_S=1
 #    OLLAMA_CONTAINER=ollama
 #
@@ -23,7 +23,7 @@ set -euo pipefail
 #    Ctrl+C
 # ============================================================
 
-LOG_FILE="${LOG_FILE:-ollama_gpu_per_model_log.csv}"
+LOG_FILE="${LOG_FILE:-gpu_monitor_log.csv}"
 INTERVAL_S="${INTERVAL_S:-1}"
 OLLAMA_CONTAINER="${OLLAMA_CONTAINER:-ollama}"
 

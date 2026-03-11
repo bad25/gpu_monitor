@@ -85,9 +85,9 @@ python3 gpu_monitor.py serve --runtime sglang --container my-sglang --api-base-u
 
 ## Output
 
-- CSV: `ollama_gpu_per_model_log.csv`
-- JSON: `ollama_gpu_per_model_snapshot.json`
-- Prometheus: `ollama_gpu_per_model.prom`
+- CSV: `gpu_monitor_log.csv`
+- JSON: `gpu_monitor_snapshot.json`
+- Prometheus: `gpu_monitor.prom`
 
 Endpoint HTTP monitor:
 

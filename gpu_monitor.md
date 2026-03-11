@@ -144,6 +144,12 @@ Per container:
 - `stats`
 - `models`
 
+Default file output:
+
+- CSV: `gpu_monitor_log.csv`
+- JSON: `gpu_monitor_snapshot.json`
+- Prometheus: `gpu_monitor.prom`
+
 ### Prometheus
 
 Metric utama:
