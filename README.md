@@ -234,8 +234,7 @@ scrape_configs:
 
 - [`gpu_monitor.py`](./gpu_monitor.py): main monitor
 - [`CHANGELOG.md`](./CHANGELOG.md): official release history
-- [`gpu_monitor.md`](./gpu_monitor.md): detailed reference
-- [`README_GPU_MONITOR_EN.md`](./README_GPU_MONITOR_EN.md): English quick start
+- [`gpu_monitor.md`](./gpu_monitor.md): detailed reference (Indonesian)
 - [`README_GPU_MONITOR_ID.md`](./README_GPU_MONITOR_ID.md): Indonesian quick start
-- [`gpu_monitor_v1.sh`](./gpu_monitor_v1.sh): older shell version
-- [`gpu_monitor_v2.sh`](./gpu_monitor_v2.sh): newer shell version
+- [`gpu_monitor_v1.sh`](./gpu_monitor_v1.sh): legacy shell version (deprecated, Ollama-only)
+- [`gpu_monitor_v2.sh`](./gpu_monitor_v2.sh): legacy shell version with dashboard (deprecated, Ollama-only)

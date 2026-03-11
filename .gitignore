@@ -14,6 +14,9 @@ env/
 gpu_monitor_log.csv
 gpu_monitor.prom
 gpu_monitor_snapshot.json
+# Legacy output names (pre-v1.0.2)
+ollama_gpu_per_model.prom
+ollama_gpu_per_model_snapshot.json
 
 # Local OS/editor files
 .DS_Store

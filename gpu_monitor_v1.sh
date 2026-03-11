@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# DEPRECATED: Shell version v1, Ollama-only.
+# Use gpu_monitor.py instead — supports all runtimes (ollama, vllm, sglang, localai, docker-model-runner, generic).
 set -euo pipefail
 
 LOG_FILE="${LOG_FILE:-gpu_monitor_log.csv}"
