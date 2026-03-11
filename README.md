@@ -13,28 +13,39 @@ The monitor collects:
 ## Architecture
 
 ```text
-+----------------------+
-|   GPU Monitor CLI    |
-+----------+-----------+
-           |
-           v
-+----------------------+
-|  NVIDIA GPU (NVML)   |
-+----------------------+
-           |
-           v
-+----------------------+
-|  Ollama Containers   |
-|  - chat              |
-|  - reasoning         |
-|  - embedding         |
-+----------------------+
-           |
-           v
-+----------------------+
-|  Future: Prometheus  |
-|  Future: Grafana     |
-+----------------------+
++-----------------------------+
+|      GPU Monitor CLI        |
+|  serve / snapshot command   |
++-------------+---------------+
+              |
+    +---------+---------+
+    |                   |
+    v                   v
++----------+   +---------------------------+
+| nvidia-  |   |  Docker Containers        |
+| smi      |   |  (ollama / vllm / sglang  |
+| (GPU     |   |   localai / model-runner  |
+| metrics) |   |   generic)                |
++----------+   +---------------------------+
+                         |
+           +-------------+-------------+
+           |             |             |
+           v             v             v
+      docker stats   runtime API   docker logs
+      (CPU/RAM/IO)   /v1/models    (OOM detect)
+                     /health
+                     /metrics
+                         |
+           +-------------+-------------+
+           |             |             |
+           v             v             v
+        CSV file     JSON file    Prometheus
+        (log)        (snapshot)   text file
+                                      |
+                                      v
+                               HTTP endpoints
+                               /metrics /health
+                               /ready /snapshot
 ```
 
 ## Supported Runtimes

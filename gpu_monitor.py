@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 #"""
 #SAWIT.tech Local AI DevOps Lab Monitor (Python)
-#- One CSV row per model per interval (Grafana/Postgres-ready)
-#- Live terminal dashboard (optional ANSI)
+#- GPU + container + model observability for AI inference runtimes
+#- Live terminal dashboard, CSV/JSON/Prometheus output, embedded HTTP exporter
 #- Sources:
 #   * GPU: nvidia-smi (host)
 #   * Container: docker stats (runtime container)
-#   * Models: runtime-specific adapters (Ollama CLI or OpenAI-compatible APIs)
+#   * Models: runtime-specific adapters (Ollama, vLLM, SGLang, LocalAI, etc.)
 #   * OOM: docker logs tail since last tick; detect "CUDA out of memory" / "out of memory"
 #
 #Usage:
-#  chmod +x monitor_ollama_gpu_per_model.py
-#  ./monitor_ollama_gpu_per_model.py
+#  python3 gpu_monitor.py serve --runtime ollama --container auto --output-mode all
+#  python3 gpu_monitor.py snapshot --runtime vllm --output-mode json
+#  python3 gpu_monitor.py --help
 #
-#Env overrides:
+#Key env overrides:
+#  MONITOR_RUNTIME=ollama|vllm|sglang|localai|docker-model-runner|generic
+#  CONTAINER_NAME=<name>     (or use --container / --image-match)
+#  INTERVAL_S=2
 #  LOG_FILE=gpu_monitor_log.csv
-#  INTERVAL_S=1
-#  MONITOR_RUNTIME=ollama
-#  CONTAINER_NAME=ollama
-#  ANSI=1 (force) / ANSI=0 (disable)
+#  ANSI=on|off|auto
 #
 #Stop:
 #  Ctrl+C
@@ -80,6 +81,8 @@ def run_cmd_result(args: List[str], timeout: float = 10.0, merge_stderr: bool = 
         )
     except subprocess.TimeoutExpired:
         return CmdResult(returncode=124, timed_out=True)
+    except OSError as exc:
+        return CmdResult(returncode=1, stderr=str(exc))
 
 
 def run_cmd(args: List[str], timeout: float = 10.0, merge_stderr: bool = False) -> str:
@@ -691,29 +694,6 @@ OOM_PAT = re.compile(
     re.IGNORECASE,
 )
 
-def detect_oom_from_logs(container: str, since_utc_iso: str, max_lines: int = 4000) -> Tuple[bool, str]:
-    """
-    Returns (oom_detected, last_matching_line).
-    """
-    # docker logs writes to stderr by default; merge_stderr=True captures it
-    out = run_cmd(["docker", "logs", "--since", since_utc_iso, container], timeout=10.0, merge_stderr=True)
-    if not out:
-        return False, ""
-
-    # limit scan cost
-    lines = out.splitlines()
-    if len(lines) > max_lines:
-        lines = lines[-max_lines:]
-
-    last = ""
-    found = False
-    for ln in lines:
-        if OOM_PAT.search(ln):
-            found = True
-            last = ln
-    return found, last.strip()
-
-
 def detect_oom_from_logs_result(container: str, since_utc_iso: str, max_lines: int = 4000) -> Tuple[bool, str, str]:
     result = run_cmd_result(["docker", "logs", "--since", since_utc_iso, container], timeout=10.0, merge_stderr=True)
     if result.timed_out:
@@ -936,7 +916,7 @@ def parse_args(argv: Optional[List[str]] = None) -> AppConfig:
     shared.add_argument(
         "--ansi",
         choices=["auto", "on", "off"],
-        default=os.environ.get("ANSI", "auto").strip().lower() if os.environ.get("ANSI") else "auto",
+        default=os.environ.get("ANSI", "auto").strip().lower(),
         help="Terminal color mode. Env fallback: ANSI.",
     )
     shared.add_argument(
@@ -960,6 +940,7 @@ def parse_args(argv: Optional[List[str]] = None) -> AppConfig:
     parser = argparse.ArgumentParser(
         description="Monitor GPU, AI runtime containers, loaded models, and OOM signals.",
     )
+    parser.add_argument("--version", action="version", version="gpu_monitor 1.0.5")
     subparsers = parser.add_subparsers(dest="command")
     serve_parser = subparsers.add_parser(
         "serve",
@@ -975,8 +956,8 @@ def parse_args(argv: Optional[List[str]] = None) -> AppConfig:
     snapshot_parser.set_defaults(command="snapshot")
 
     args_list = list(argv) if argv is not None else sys.argv[1:]
-    if args_list in (["-h"], ["--help"]):
-        parser.print_help()
+    if args_list in (["-h"], ["--help"], ["--version"]):
+        parser.parse_args(args_list)
         raise SystemExit(0)
     if not args_list or args_list[0].startswith("-"):
         args_list = ["serve", *args_list]
@@ -1091,7 +1072,7 @@ def build_json_payload(
 
 def write_json_snapshot(path: str, payload: Dict[str, Any]) -> None:
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=True, indent=2)
+        json.dump(payload, f, ensure_ascii=False, indent=2)
         f.write("\n")
 
 
@@ -1423,7 +1404,7 @@ def start_http_server(host: str, port: int, state: SharedSnapshotState) -> Threa
             if self.path == "/health":
                 with state.lock:
                     payload = state.health_payload or {"status": "starting"}
-                body = (json.dumps(payload, ensure_ascii=True, indent=2) + "\n").encode("utf-8")
+                body = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -1434,7 +1415,7 @@ def start_http_server(host: str, port: int, state: SharedSnapshotState) -> Threa
             if self.path == "/snapshot":
                 with state.lock:
                     payload = state.json_payload or {"status": "starting"}
-                body = (json.dumps(payload, ensure_ascii=True, indent=2) + "\n").encode("utf-8")
+                body = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -1447,7 +1428,7 @@ def start_http_server(host: str, port: int, state: SharedSnapshotState) -> Threa
                     payload = state.ready_payload or {"ready": False, "status": "starting"}
                 status_code = int(payload.get("status_code", 503))
                 body_payload = {k: v for k, v in payload.items() if k != "status_code"}
-                body = (json.dumps(body_payload, ensure_ascii=True, indent=2) + "\n").encode("utf-8")
+                body = (json.dumps(body_payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
                 self.send_response(status_code)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -1473,9 +1454,9 @@ def start_http_server(host: str, port: int, state: SharedSnapshotState) -> Threa
 # Main loop
 # -------------------------
 def clear_screen() -> None:
-    # avoid external clear; use ANSI if possible
-    sys.stdout.write("\033[2J\033[H")
-    sys.stdout.flush()
+    if sys.stdout.isatty():
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
 
 
 def main() -> int:
@@ -1534,6 +1515,7 @@ def main() -> int:
         }
 
         while True:
+          try:
             host_ts = now_local_str()
             tick_started_ts = time.time()
             containers, resolution_msg = resolve_runtime_containers(runtime, requested_container, image_match)
@@ -1551,8 +1533,7 @@ def main() -> int:
                 last_log_check_ts[container] = tick_started_ts
 
             # terminal dashboard
-            if sys.stdout.isatty():
-                clear_screen()
+            clear_screen()
             print(f"{A.CYAN}{A.BOLD}╔══════════════════════════════════════════════════════════════╗{A.RESET}")
             print(f"{A.CYAN}{A.BOLD}║            █  SAWIT.tech LOCAL AI DEVOPS LAB  █              ║{A.RESET}")
             print(f"{A.CYAN}{A.BOLD}║        GPU / LLM / CONTAINER OBSERVABILITY (PY)              ║{A.RESET}")
@@ -1683,6 +1664,13 @@ def main() -> int:
                     f.write(prom_text)
             if not run_forever:
                 return 0
+            time.sleep(interval_s)
+          except KeyboardInterrupt:
+            raise
+          except Exception as exc:
+            print(f"[gpu_monitor] tick error: {exc}", file=sys.stderr)
+            if not run_forever:
+                raise
             time.sleep(interval_s)
     finally:
         shutdown_http_server(http_server)
