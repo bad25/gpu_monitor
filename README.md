@@ -10,6 +10,33 @@ The monitor collects:
 - GPU OOM signals from `docker logs`
 - Prometheus, JSON, CSV, and optional embedded HTTP exporter output
 
+## Architecture
+
+```text
++----------------------+
+|   GPU Monitor CLI    |
++----------+-----------+
+           |
+           v
++----------------------+
+|  NVIDIA GPU (NVML)   |
++----------------------+
+           |
+           v
++----------------------+
+|  Ollama Containers   |
+|  - chat              |
+|  - reasoning         |
+|  - embedding         |
++----------------------+
+           |
+           v
++----------------------+
+|  Future: Prometheus  |
+|  Future: Grafana     |
++----------------------+
+```
+
 ## Supported Runtimes
 
 Current runtime adapters:
