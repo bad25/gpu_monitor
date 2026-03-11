@@ -1,166 +1,97 @@
 # GPU Monitor
 
-Quick start for [gpu_monitor.py](./gpu_monitor.py).
+Quick start for the multi-runtime monitor in [gpu_monitor.py](./gpu_monitor.py).
 
-Full reference is available in [gpu_monitor.md](./gpu_monitor.md).
+Main documentation:
 
-## What It Does
+- Main README: [README.md](./README.md)
+- Full reference: [gpu_monitor.md](./gpu_monitor.md)
 
-This script monitors:
+## Supported Runtimes
 
-- host GPU metrics via `nvidia-smi`
-- Ollama container metrics via `docker stats`
-- loaded models via `ollama ps`
-- OOM signals via `docker logs`
-
-Main features:
-
-- multi-container Ollama auto-discovery
-- multi-GPU support
-- `csv`, `json`, and `prometheus` outputs
-- HTTP endpoints `/metrics`, `/health`, `/ready`, `/snapshot`
-- `serve` and `snapshot` modes
-
-## Requirements
-
-- Python 3
-- `docker`
-- `nvidia-smi`
+- `ollama`
+- `vllm`
+- `sglang`
+- `localai`
+- `docker-model-runner`
+- `generic`
 
 ## Quick Start
 
-Run the continuous monitor:
+Ollama:
 
 ```bash
 python3 gpu_monitor.py serve \
+  --runtime ollama \
+  --container auto \
   --output-mode all \
   --metrics-http \
-  --interval 2 \
-  --container auto
+  --interval 2
 ```
 
-Collect one snapshot and exit:
+vLLM:
+
+```bash
+python3 gpu_monitor.py serve \
+  --runtime vllm \
+  --container auto \
+  --output-mode all \
+  --metrics-http \
+  --interval 2
+```
+
+SGLang:
+
+```bash
+python3 gpu_monitor.py serve \
+  --runtime sglang \
+  --container auto \
+  --output-mode all \
+  --metrics-http \
+  --interval 2
+```
+
+Generic container:
+
+```bash
+python3 gpu_monitor.py serve \
+  --runtime generic \
+  --container my-runtime-container \
+  --output-mode all
+```
+
+One-shot snapshot:
 
 ```bash
 python3 gpu_monitor.py snapshot \
-  --output-mode json \
-  --container auto
+  --runtime vllm \
+  --container auto \
+  --output-mode json
 ```
 
-Show help:
+## Notes
+
+- `ollama` uses `docker exec <container> ollama ps`
+- `vllm` and `sglang` use `/v1/models`, `/health`, and `/metrics`
+- `localai` and `docker-model-runner` use `/v1/models`
+- `generic` only monitors GPU, container stats, and OOM logs
+
+If runtime API auto-detection fails, override it manually:
 
 ```bash
-python3 gpu_monitor.py --help
-python3 gpu_monitor.py serve --help
-python3 gpu_monitor.py snapshot --help
+python3 gpu_monitor.py serve --runtime vllm --container my-vllm --runtime-port 8000
+python3 gpu_monitor.py serve --runtime sglang --container my-sglang --api-base-url http://127.0.0.1:30000
 ```
 
-## Output
+## Outputs
 
-- CSV log: default `ollama_gpu_per_model_log.csv`
-- JSON snapshot: default `ollama_gpu_per_model_snapshot.json`
-- Prometheus text: default `ollama_gpu_per_model.prom`
+- CSV: `ollama_gpu_per_model_log.csv`
+- JSON: `ollama_gpu_per_model_snapshot.json`
+- Prometheus: `ollama_gpu_per_model.prom`
 
-Container CPU note:
+Monitor HTTP endpoints:
 
-- container CPU comes from `docker stats`
-- values can exceed `100%` on multi-core hosts
-- example: `329.36%` means the container is using about `3.29` CPU cores
-
-Output modes:
-
-- `csv`
-- `json`
-- `prometheus`
-- combinations such as `csv,json`
-- `all`
-
-## HTTP Endpoints
-
-If `--metrics-http` is enabled, the default endpoints are:
-
-- `http://127.0.0.1:9464/metrics`
-- `http://127.0.0.1:9464/health`
-- `http://127.0.0.1:9464/ready`
-- `http://127.0.0.1:9464/snapshot`
-
-## Important Options
-
-- `--container auto`
-  Auto-discover all active Ollama containers.
-- `--output-mode all`
-  Write CSV, JSON, and Prometheus outputs together.
-- `--metrics-http`
-  Enable the embedded HTTP exporter.
-- `--interval 2`
-  Collect every 2 seconds.
-
-## Common Examples
-
-Target a specific container:
-
-```bash
-python3 gpu_monitor.py serve \
-  --container ollama-chat \
-  --output-mode csv,prometheus
-```
-
-Run only the HTTP exporter path:
-
-```bash
-python3 gpu_monitor.py serve \
-  --output-mode prometheus \
-  --metrics-http
-```
-
-## Prometheus Scrape Config
-
-Example `prometheus.yml`:
-
-```yaml
-scrape_configs:
-  - job_name: gpu_monitor
-    scrape_interval: 5s
-    static_configs:
-      - targets:
-          - 127.0.0.1:9464
-```
-
-If the monitor runs on another host, replace the target with the correct `host:port`.
-
-## systemd Service
-
-Example unit file:
-
-```ini
-[Unit]
-Description=GPU Monitor for Ollama
-After=docker.service network.target
-Requires=docker.service
-
-[Service]
-Type=simple
-User=srwd
-WorkingDirectory=/opt/gpu_monitor
-ExecStart=/usr/bin/python3 /opt/gpu_monitor/gpu_monitor.py serve --output-mode all --metrics-http --metrics-http-host 127.0.0.1 --metrics-http-port 9464 --interval 2 --container auto
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Typical steps:
-
-```bash
-sudo cp /path/to/gpu-monitor.service /etc/systemd/system/gpu-monitor.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now gpu-monitor.service
-sudo systemctl status gpu-monitor.service
-```
-
-## References
-
-- Full reference: [gpu_monitor.md](./gpu_monitor.md)
-- Script: [gpu_monitor.py](./gpu_monitor.py)
-- Indonesian quick start: [README_GPU_MONITOR_ID.md](./README_GPU_MONITOR_ID.md)
+- `/metrics`
+- `/health`
+- `/ready`
+- `/snapshot`

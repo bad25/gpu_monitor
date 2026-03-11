@@ -1,165 +1,97 @@
 # GPU Monitor
 
-Quick start untuk [gpu_monitor.py](./gpu_monitor.py).
+Quick start untuk monitor multi-runtime di [gpu_monitor.py](./gpu_monitor.py).
 
-Dokumentasi lengkap ada di [gpu_monitor.md](./gpu_monitor.md).
+Dokumentasi utama:
 
-## Fungsi
+- README utama: [README.md](./README.md)
+- Referensi lengkap: [gpu_monitor.md](./gpu_monitor.md)
 
-Script ini memonitor:
+## Runtime yang Didukung
 
-- GPU host via `nvidia-smi`
-- container Ollama via `docker stats`
-- model aktif via `ollama ps`
-- OOM signal via `docker logs`
-
-Fitur utama:
-
-- multi-container Ollama auto-discovery
-- support multi-GPU
-- output `csv`, `json`, `prometheus`
-- HTTP endpoints `/metrics`, `/health`, `/ready`, `/snapshot`
-- mode `serve` dan `snapshot`
-
-## Requirement
-
-- Python 3
-- `docker`
-- `nvidia-smi`
+- `ollama`
+- `vllm`
+- `sglang`
+- `localai`
+- `docker-model-runner`
+- `generic`
 
 ## Quick Start
 
-Jalankan monitor terus-menerus:
+Ollama:
 
 ```bash
 python3 gpu_monitor.py serve \
+  --runtime ollama \
+  --container auto \
   --output-mode all \
   --metrics-http \
-  --interval 2 \
-  --container auto
+  --interval 2
 ```
 
-Ambil satu snapshot lalu keluar:
+vLLM:
+
+```bash
+python3 gpu_monitor.py serve \
+  --runtime vllm \
+  --container auto \
+  --output-mode all \
+  --metrics-http \
+  --interval 2
+```
+
+SGLang:
+
+```bash
+python3 gpu_monitor.py serve \
+  --runtime sglang \
+  --container auto \
+  --output-mode all \
+  --metrics-http \
+  --interval 2
+```
+
+Container generic:
+
+```bash
+python3 gpu_monitor.py serve \
+  --runtime generic \
+  --container my-runtime-container \
+  --output-mode all
+```
+
+Snapshot satu kali:
 
 ```bash
 python3 gpu_monitor.py snapshot \
-  --output-mode json \
-  --container auto
+  --runtime vllm \
+  --container auto \
+  --output-mode json
 ```
 
-Lihat help:
+## Catatan
+
+- `ollama` memakai `docker exec <container> ollama ps`
+- `vllm` dan `sglang` memakai `/v1/models`, `/health`, dan `/metrics`
+- `localai` dan `docker-model-runner` memakai `/v1/models`
+- `generic` hanya monitor GPU, statistik container, dan log OOM
+
+Kalau auto-detect API runtime gagal, override manual:
 
 ```bash
-python3 gpu_monitor.py --help
-python3 gpu_monitor.py serve --help
-python3 gpu_monitor.py snapshot --help
+python3 gpu_monitor.py serve --runtime vllm --container my-vllm --runtime-port 8000
+python3 gpu_monitor.py serve --runtime sglang --container my-sglang --api-base-url http://127.0.0.1:30000
 ```
 
 ## Output
 
-- CSV log: default `ollama_gpu_per_model_log.csv`
-- JSON snapshot: default `ollama_gpu_per_model_snapshot.json`
-- Prometheus text: default `ollama_gpu_per_model.prom`
+- CSV: `ollama_gpu_per_model_log.csv`
+- JSON: `ollama_gpu_per_model_snapshot.json`
+- Prometheus: `ollama_gpu_per_model.prom`
 
-Catatan CPU container:
+Endpoint HTTP monitor:
 
-- nilai CPU berasal dari `docker stats`
-- nilai bisa lebih dari `100%` pada host multi-core
-- contoh `329.36%` berarti kira-kira memakai `3.29` core CPU
-
-Output mode:
-
-- `csv`
-- `json`
-- `prometheus`
-- kombinasi seperti `csv,json`
-- `all`
-
-## HTTP Endpoints
-
-Jika `--metrics-http` aktif, default endpoint:
-
-- `http://127.0.0.1:9464/metrics`
-- `http://127.0.0.1:9464/health`
-- `http://127.0.0.1:9464/ready`
-- `http://127.0.0.1:9464/snapshot`
-
-## Opsi Penting
-
-- `--container auto`
-  Auto-discover semua container Ollama aktif.
-- `--output-mode all`
-  Tulis CSV, JSON, dan Prometheus sekaligus.
-- `--metrics-http`
-  Enable embedded HTTP exporter.
-- `--interval 2`
-  Collect setiap 2 detik.
-
-## Contoh Umum
-
-Target satu container tertentu:
-
-```bash
-python3 gpu_monitor.py serve \
-  --container ollama-chat \
-  --output-mode csv,prometheus
-```
-
-HTTP exporter saja:
-
-```bash
-python3 gpu_monitor.py serve \
-  --output-mode prometheus \
-  --metrics-http
-```
-
-## Prometheus Scrape Config
-
-Contoh `prometheus.yml`:
-
-```yaml
-scrape_configs:
-  - job_name: gpu_monitor
-    scrape_interval: 5s
-    static_configs:
-      - targets:
-          - 127.0.0.1:9464
-```
-
-Jika monitor jalan di host lain, ganti target ke `host:port` yang sesuai.
-
-## systemd Service
-
-Contoh unit file:
-
-```ini
-[Unit]
-Description=GPU Monitor for Ollama
-After=docker.service network.target
-Requires=docker.service
-
-[Service]
-Type=simple
-User=srwd
-WorkingDirectory=/opt/gpu_monitor
-ExecStart=/usr/bin/python3 /opt/gpu_monitor/gpu_monitor.py serve --output-mode all --metrics-http --metrics-http-host 127.0.0.1 --metrics-http-port 9464 --interval 2 --container auto
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Langkah umum:
-
-```bash
-sudo cp /path/to/gpu-monitor.service /etc/systemd/system/gpu-monitor.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now gpu-monitor.service
-sudo systemctl status gpu-monitor.service
-```
-
-## Referensi
-
-- Ringkasan lengkap: [gpu_monitor.md](./gpu_monitor.md)
-- Script: [gpu_monitor.py](./gpu_monitor.py)
+- `/metrics`
+- `/health`
+- `/ready`
+- `/snapshot`

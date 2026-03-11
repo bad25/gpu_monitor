@@ -1,329 +1,225 @@
 # GPU Monitor Reference
 
-Referensi lengkap untuk [gpu_monitor.py](/home/srwd/gpu_monitor.py).
+Referensi lengkap untuk monitor multi-runtime di [gpu_monitor.py](./gpu_monitor.py).
 
-Untuk quick start, lihat:
+Dokumen terkait:
 
-- Bahasa Indonesia: [README_GPU_MONITOR_ID.md](/home/srwd/README_GPU_MONITOR_ID.md)
-- English: [README_GPU_MONITOR_EN.md](/home/srwd/README_GPU_MONITOR_EN.md)
+- Main README: [README.md](./README.md)
+- English quick start: [README_GPU_MONITOR_EN.md](./README_GPU_MONITOR_EN.md)
+- Indonesian quick start: [README_GPU_MONITOR_ID.md](./README_GPU_MONITOR_ID.md)
 
 ## Ringkasan
 
-`gpu_monitor.py` adalah monitor observability untuk host GPU yang menjalankan beberapa container Ollama. Script ini mengumpulkan:
+`gpu_monitor.py` adalah monitor observability untuk host GPU yang menjalankan runtime AI berbasis container. Saat ini monitor mendukung:
 
-- metrik GPU dari `nvidia-smi`
-- metrik container dari `docker stats`
-- model aktif dari `docker exec <container> ollama ps`
-- sinyal OOM dari `docker logs`
+- `ollama`
+- `vllm`
+- `sglang`
+- `localai`
+- `docker-model-runner`
+- `generic`
 
-Script mendukung:
+Data yang dikumpulkan:
 
-- auto-discovery multi-container Ollama
-- support multi-GPU
-- output `csv`, `json`, dan `prometheus`
-- HTTP endpoint `/metrics`, `/health`, `/ready`, `/snapshot`
-- mode daemon `serve` dan mode one-shot `snapshot`
+- metrik GPU host dari `nvidia-smi`
+- statistik container dari `docker stats`
+- daftar model aktif atau tersedia dari adapter runtime
+- sinyal OOM GPU dari `docker logs`
+- output `csv`, `json`, `prometheus`
+- embedded HTTP endpoint `/metrics`, `/health`, `/ready`, `/snapshot`
 
-## Requirement
+## Runtime Adapter
 
-- Python 3
-- `docker`
-- `nvidia-smi`
-- container Ollama aktif, atau nama container spesifik bila ingin menargetkan satu instance
+### Ollama
 
-## Mode Command
+- discovery default berdasarkan image yang mengandung `ollama`
+- model introspection memakai `docker exec <container> ollama ps`
 
-Root command:
+### vLLM
 
-```bash
-python3 /home/srwd/gpu_monitor.py --help
-```
+- discovery default berdasarkan image yang mengandung `vllm`
+- model introspection memakai `GET /v1/models`
+- runtime probe memakai `GET /health`
+- runtime metrics probe memakai `GET /metrics`
 
-Subcommand:
+### SGLang
 
-- `serve`: jalan terus dan collect tiap interval
-- `snapshot`: collect sekali lalu exit
+- discovery default berdasarkan image yang mengandung `sglang`
+- model introspection memakai `GET /v1/models`
+- runtime probe memakai `GET /health`
+- runtime metrics probe memakai `GET /metrics`
 
-Contoh:
+### LocalAI
 
-```bash
-python3 /home/srwd/gpu_monitor.py serve
-python3 /home/srwd/gpu_monitor.py snapshot
-```
+- discovery default berdasarkan image yang mengandung `localai`
+- model introspection memakai `GET /v1/models`
 
-Tanpa subcommand, script otomatis dianggap `serve`.
+### Docker Model Runner
+
+- discovery default berdasarkan image yang mengandung `model-runner`
+- model introspection memakai `GET /v1/models`
+
+### Generic
+
+- dipakai untuk runtime lain yang belum punya adapter
+- hanya monitor GPU host, statistik container, dan OOM log
 
 ## CLI Options
 
-Option yang tersedia untuk `serve` dan `snapshot`:
+Flag utama untuk `serve` dan `snapshot`:
 
-- `--log-file`
-  Path output CSV.
-- `--json-file`
-  Path output JSON snapshot.
-- `--prom-file`
-  Path output Prometheus text.
-- `--output-mode`
-  Nilai: `csv`, `json`, `prometheus`, kombinasi seperti `csv,json`, atau `all`.
-- `--interval`
-  Interval collect dalam detik.
+- `--runtime`
+  Pilihan: `ollama`, `vllm`, `sglang`, `localai`, `docker-model-runner`, `generic`
 - `--container`
-  Nama container spesifik, atau `auto`, `ollama`, `*` untuk auto-discovery.
-- `--ansi`
-  Nilai: `auto`, `on`, `off`.
-- `--metrics-http` / `--no-metrics-http`
-  Enable atau disable embedded HTTP server.
-- `--metrics-http-host`
-  Host bind untuk HTTP server.
-- `--metrics-http-port`
-  Port bind untuk HTTP server.
-
-Lihat help detail:
-
-```bash
-python3 /home/srwd/gpu_monitor.py serve --help
-python3 /home/srwd/gpu_monitor.py snapshot --help
-```
+  Nama container spesifik, atau `auto`
+- `--image-match`
+  Override substring image untuk discovery container
+- `--api-base-url`
+  Override base URL API runtime
+- `--runtime-port`
+  Override host port API runtime
+- `--log-file`
+  Path output CSV
+- `--json-file`
+  Path output JSON
+- `--prom-file`
+  Path output Prometheus text
+- `--output-mode`
+  `csv`, `json`, `prometheus`, kombinasi, atau `all`
+- `--interval`
+  Interval collection
+- `--metrics-http`
+  Aktifkan HTTP exporter milik monitor
 
 ## Environment Variable Fallback
 
-Kalau flag tidak diberikan, script akan fallback ke env berikut:
-
+- `MONITOR_RUNTIME`
+- `CONTAINER_NAME`
+- `OLLAMA_CONTAINER`
+- `IMAGE_MATCH`
+- `API_BASE_URL`
+- `RUNTIME_PORT`
 - `LOG_FILE`
 - `JSON_FILE`
 - `PROM_FILE`
 - `OUTPUT_MODE`
 - `INTERVAL_S`
-- `OLLAMA_CONTAINER`
 - `ANSI`
 - `METRICS_HTTP`
 - `METRICS_HTTP_HOST`
 - `METRICS_HTTP_PORT`
 
-## Perilaku Discovery Container
-
-Default target adalah `ollama`, tetapi script tidak hardcode ke nama container itu.
-
-Perilakunya:
-
-- kalau `--container` menunjuk ke container yang valid dan running, script pakai itu
-- kalau `--container` adalah `ollama`, `auto`, atau `*`, script auto-discover semua container berbasis image `ollama/ollama`
-- kalau container spesifik yang diminta tidak running, script fallback ke hasil discovery dan menampilkan pesan discovery di dashboard
-
-## Output Modes
+## Output Schema
 
 ### CSV
 
-Mode `csv` melakukan append ke file log.
+CSV kini menyertakan field runtime-aware, termasuk:
 
-Isi row mencakup:
+- `container_runtime`
+- `container_status`
+- `container_error`
 
-- waktu host
-- identitas GPU: `gpu_id`, `gpu_name`, `gpu_uuid`
-- metrik GPU
-- nama/status/error container
-- data model aktif
-- stats container
-- flag OOM
-
-Catatan:
-
-- jika header CSV lama tidak cocok dengan schema terbaru, file lama akan di-rotate otomatis menjadi file `.bak.<timestamp>`
+Jika schema CSV berubah, file lama akan di-rotate ke `.bak.<timestamp>`.
 
 ### JSON
 
-Mode `json` menulis snapshot penuh terbaru ke satu file JSON.
+Payload JSON kini menyertakan:
 
-Strukturnya mencakup:
+- `runtime`
+- `requested_container`
+- `discovery_message`
+- `gpus`
+- `containers`
 
-- metadata waktu dan discovery
-- array `gpus`
-- array `containers`
-- stats, error, OOM, dan model per container
+Per container:
+
+- `name`
+- `runtime`
+- `api_base_url`
+- `status`
+- `error`
+- `runtime_health_ok`
+- `runtime_metrics_ok`
+- `runtime_metrics_samples`
+- `stats`
+- `models`
 
 ### Prometheus
 
-Mode `prometheus` menulis file text format Prometheus.
+Metric utama:
 
-Catatan CPU container:
+- `gpu_monitor_gpu_util_percent`
+- `gpu_monitor_gpu_mem_util_percent`
+- `gpu_monitor_gpu_mem_used_mib`
+- `gpu_monitor_gpu_mem_total_mib`
+- `gpu_monitor_gpu_power_watts`
+- `gpu_monitor_gpu_temp_celsius`
+- `gpu_monitor_gpu_sm_clock_mhz`
+- `gpu_monitor_container_status`
+- `gpu_monitor_container_cpu_percent`
+- `gpu_monitor_container_mem_percent`
+- `gpu_monitor_container_pids`
+- `gpu_monitor_container_models_loaded`
+- `gpu_monitor_container_oom_detected`
+- `gpu_monitor_runtime_health_up`
+- `gpu_monitor_runtime_metrics_up`
+- `gpu_monitor_runtime_metrics_samples`
+- `gpu_monitor_container_error_state`
+- `gpu_monitor_model_loaded`
 
-- nilai CPU container mengikuti `docker stats`
-- angka dapat lebih dari `100%` pada host multi-core
-- contoh `329.36%` berarti container sedang memakai sekitar `3.29` core CPU
+## Embedded HTTP Endpoints
 
-Metric utama yang tersedia:
-
-- GPU:
-  - `gpu_monitor_gpu_util_percent`
-  - `gpu_monitor_gpu_mem_util_percent`
-  - `gpu_monitor_gpu_mem_used_mib`
-  - `gpu_monitor_gpu_mem_total_mib`
-  - `gpu_monitor_gpu_power_watts`
-  - `gpu_monitor_gpu_temp_celsius`
-  - `gpu_monitor_gpu_sm_clock_mhz`
-- Container:
-  - `gpu_monitor_container_status`
-  - `gpu_monitor_container_cpu_percent`
-  - `gpu_monitor_container_mem_percent`
-  - `gpu_monitor_container_pids`
-  - `gpu_monitor_container_models_loaded`
-  - `gpu_monitor_container_oom_detected`
-  - `gpu_monitor_container_error_state`
-- Model:
-  - `gpu_monitor_model_loaded`
-  - `gpu_monitor_model_context_tokens`
-  - `gpu_monitor_model_context_percent`
-  - `gpu_monitor_model_size_bytes`
-  - `gpu_monitor_model_until_seconds`
-
-## HTTP Endpoints
-
-Aktif jika `--metrics-http` dinyalakan.
-
-Default bind:
-
-- host: `127.0.0.1`
-- port: `9464`
-
-Endpoint:
+Endpoint milik monitor:
 
 - `/metrics`
-  Output Prometheus text untuk di-scrape Prometheus.
 - `/health`
-  Ringkasan JSON status collector dan container.
 - `/ready`
-  Readiness probe.
-  `200` jika minimal satu container berstatus `ok` atau `idle`.
-  `503` jika belum ada snapshot yang usable atau semua collector gagal.
 - `/snapshot`
-  Full JSON snapshot yang sama levelnya dengan output file JSON.
 
-Contoh:
+Catatan:
+
+- ini berbeda dari endpoint runtime seperti `vllm` atau `sglang`
+- untuk `vllm` dan `sglang`, monitor juga mencoba probe ke `/health` dan `/metrics` milik runtime
+
+## Contoh
+
+Ollama:
 
 ```bash
-curl http://127.0.0.1:9464/metrics
-curl http://127.0.0.1:9464/health
-curl http://127.0.0.1:9464/ready
-curl http://127.0.0.1:9464/snapshot
+python3 gpu_monitor.py serve --runtime ollama --container auto --output-mode all --metrics-http
+```
+
+vLLM:
+
+```bash
+python3 gpu_monitor.py serve --runtime vllm --container auto --output-mode all --metrics-http
+```
+
+SGLang dengan port override:
+
+```bash
+python3 gpu_monitor.py serve --runtime sglang --container auto --runtime-port 30000 --output-mode all
+```
+
+Generic runtime:
+
+```bash
+python3 gpu_monitor.py serve --runtime generic --container my-runtime-container --output-mode prometheus
 ```
 
 ## Error Classification
 
-Script membedakan beberapa error operasional, misalnya:
+Beberapa error operasional yang dapat muncul:
 
 - `docker_socket_permission_denied`
 - `docker_daemon_unreachable`
 - `container_not_found`
 - `container_not_running`
+- `api_endpoint_unresolved`
+- `api_request_failed`
+- `api_http_error`
+- `api_invalid_json`
 - `ollama_ps_failed`
 - `ollama_ps_timed_out`
 - `docker_logs_timed_out`
 - `docker_stats_no_data`
-
-Error ini:
-
-- ditampilkan di dashboard per container
-- ditulis ke field `container_error`
-- diekspor ke metric `gpu_monitor_container_error_state`
-
-## Contoh Pemakaian
-
-Daemon dengan semua output:
-
-```bash
-python3 /home/srwd/gpu_monitor.py serve \
-  --output-mode all \
-  --metrics-http \
-  --metrics-http-host 127.0.0.1 \
-  --metrics-http-port 9464 \
-  --interval 2 \
-  --container auto
-```
-
-One-shot snapshot JSON:
-
-```bash
-python3 /home/srwd/gpu_monitor.py snapshot \
-  --output-mode json \
-  --container auto
-```
-
-Target satu container tertentu:
-
-```bash
-python3 /home/srwd/gpu_monitor.py serve \
-  --container ollama-chat \
-  --output-mode csv,prometheus
-```
-
-Hanya HTTP exporter tanpa CSV:
-
-```bash
-python3 /home/srwd/gpu_monitor.py serve \
-  --output-mode prometheus \
-  --metrics-http
-```
-
-## Contoh Prometheus Scrape Config
-
-Contoh `prometheus.yml`:
-
-```yaml
-scrape_configs:
-  - job_name: gpu_monitor
-    scrape_interval: 5s
-    static_configs:
-      - targets:
-          - 127.0.0.1:9464
-```
-
-Catatan:
-
-- endpoint yang di-scrape adalah `/metrics`
-- aktifkan monitor dengan `--metrics-http`
-- ubah target jika monitor berjalan di host lain
-
-## Contoh systemd Service
-
-Contoh unit file:
-
-```ini
-[Unit]
-Description=GPU Monitor for Ollama
-After=docker.service network.target
-Requires=docker.service
-
-[Service]
-Type=simple
-User=srwd
-WorkingDirectory=/home/srwd
-ExecStart=/usr/bin/python3 /home/srwd/gpu_monitor.py serve --output-mode all --metrics-http --metrics-http-host 127.0.0.1 --metrics-http-port 9464 --interval 2 --container auto
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Langkah umum deploy:
-
-```bash
-sudo cp gpu-monitor.service /etc/systemd/system/gpu-monitor.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now gpu-monitor.service
-sudo systemctl status gpu-monitor.service
-```
-
-## Saran Operasional
-
-Saran penggunaan:
-
-- pakai `serve` untuk monitoring terus-menerus
-- pakai `snapshot` untuk cron, debug, atau verifikasi cepat
-- pakai `--output-mode prometheus --metrics-http` kalau ingin integrasi Prometheus yang paling bersih
-- pakai `--container auto` kalau host menjalankan lebih dari satu instance Ollama
-
-## File Terkait
-
-- Script: [gpu_monitor.py](/home/srwd/gpu_monitor.py)
-- Dokumentasi ini: [gpu_monitor.md](/home/srwd/gpu_monitor.md)
