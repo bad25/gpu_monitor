@@ -8,6 +8,17 @@ The format is based on Keep a Changelog, and this project uses Semantic Versioni
 
 No unreleased changes yet.
 
+## [1.0.5] - 2026-03-12
+
+### Fixed
+
+- Fixed `--version` flag silently breaking due to serve-prepend fallback in `parse_args`.
+- Fixed `run_cmd_result` not catching `OSError`/`FileNotFoundError` — now returns a failed `CmdResult` instead of crashing on missing executables.
+- Fixed redundant `sys.stdout.isatty()` check at `clear_screen` call site; guard is now canonical inside `clear_screen()` only.
+- Fixed `ensure_ascii=True` in HTTP server `/health`, `/snapshot`, `/ready` endpoints — non-ASCII model names now serialize correctly.
+- Added per-tick `try/except` in the `serve` loop so transient errors log to stderr and the monitor continues instead of crashing.
+- Updated stale file header comment to reflect current multi-runtime usage and correct filename.
+
 ## [1.0.4] - 2026-03-11
 
 ### Changed
