@@ -5,8 +5,8 @@
 #- Live terminal dashboard (optional ANSI)
 #- Sources:
 #   * GPU: nvidia-smi (host)
-#   * Container: docker stats (ollama container)
-#   * Models: docker exec <container> ollama ps (robust column parsing)
+#   * Container: docker stats (runtime container)
+#   * Models: runtime-specific adapters (Ollama CLI or OpenAI-compatible APIs)
 #   * OOM: docker logs tail since last tick; detect "CUDA out of memory" / "out of memory"
 #
 #Usage:
@@ -16,7 +16,8 @@
 #Env overrides:
 #  LOG_FILE=ollama_gpu_per_model_log.csv
 #  INTERVAL_S=1
-#  OLLAMA_CONTAINER=ollama
+#  MONITOR_RUNTIME=ollama
+#  CONTAINER_NAME=ollama
 #  ANSI=1 (force) / ANSI=0 (disable)
 #
 #Stop:
@@ -35,6 +36,8 @@ import shutil
 import subprocess
 import concurrent.futures
 import threading
+import urllib.request
+import urllib.error
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -205,11 +208,18 @@ class ModelRow:
 @dataclass
 class ContainerReport:
     name: str
+    runtime: str
+    api_base_url: str
     stats: ContainerSnap
     models: List[ModelRow]
     oom_detected: bool
     oom_line: str
     status: str
+    runtime_health_ok: bool = False
+    runtime_health_error: str = ""
+    runtime_metrics_ok: bool = False
+    runtime_metrics_error: str = ""
+    runtime_metrics_samples: int = 0
     stats_error: str = ""
     ps_error: str = ""
     oom_error: str = ""
@@ -236,7 +246,11 @@ class AppConfig:
     metrics_http_host: str
     metrics_http_port: int
     interval_s: float
+    runtime: str
     requested_container: str
+    image_match: str
+    api_base_url: str
+    runtime_port: int
     ansi_enabled: bool
 
 
@@ -334,15 +348,61 @@ def get_container_stats(container: str) -> Tuple[ContainerSnap, str]:
     ), ""
 
 
-def list_running_ollama_containers() -> Tuple[List[str], str]:
+RUNTIME_IMAGE_KEYWORDS: Dict[str, List[str]] = {
+    "ollama": ["ollama/ollama", "ollama"],
+    "vllm": ["vllm"],
+    "sglang": ["sglang"],
+    "localai": ["localai"],
+    "docker-model-runner": ["model-runner", "docker/model-runner"],
+    "generic": [],
+}
+
+RUNTIME_DEFAULT_PORTS: Dict[str, List[int]] = {
+    "ollama": [11434],
+    "vllm": [8000],
+    "sglang": [30000, 8000],
+    "localai": [8080, 8000],
+    "docker-model-runner": [12434, 8000],
+    "generic": [8000, 8080],
+}
+
+OPENAI_COMPATIBLE_RUNTIMES = {"vllm", "sglang", "localai", "docker-model-runner"}
+
+
+def normalize_runtime(runtime: str) -> str:
+    text = (runtime or "").strip().lower()
+    aliases = {
+        "docker_model_runner": "docker-model-runner",
+        "docker-modelrunner": "docker-model-runner",
+        "model-runner": "docker-model-runner",
+        "model_runner": "docker-model-runner",
+    }
+    return aliases.get(text, text or "ollama")
+
+
+def list_running_containers(runtime: str, image_match: str) -> Tuple[List[str], str]:
     result = run_cmd_result([
         "docker", "ps",
-        "--filter", "ancestor=ollama/ollama",
-        "--format", "{{.Names}}",
+        "--format", "{{.Names}}\t{{.Image}}",
     ], timeout=5.0)
     if not result.ok:
         return [], classify_docker_error(result.stderr)
-    return [ln.strip() for ln in result.stdout.splitlines() if ln.strip()], ""
+
+    requested_keywords = [part.strip().lower() for part in image_match.split(",") if part.strip()]
+    if requested_keywords:
+        keywords = requested_keywords
+    else:
+        keywords = RUNTIME_IMAGE_KEYWORDS.get(runtime, [])
+
+    matches: List[str] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        name, _, image = line.partition("\t")
+        image_lower = image.strip().lower()
+        if not keywords or any(keyword in image_lower for keyword in keywords):
+            matches.append(name.strip())
+    return matches, ""
 
 
 def container_exists(container: str) -> bool:
@@ -354,6 +414,52 @@ def container_exists(container: str) -> bool:
         "--format", "{{.Names}}",
     ], timeout=5.0)
     return any(ln.strip() == container for ln in out.splitlines())
+
+
+def docker_port_lines(container: str) -> List[str]:
+    out = run_cmd(["docker", "port", container], timeout=5.0)
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def get_container_ip(container: str) -> str:
+    out = run_cmd([
+        "docker", "inspect",
+        "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+        container,
+    ], timeout=5.0)
+    return out.strip()
+
+
+def detect_container_api_base(container: str, runtime: str, explicit_base_url: str, explicit_port: int) -> str:
+    if explicit_base_url:
+        return explicit_base_url.rstrip("/")
+    if explicit_port > 0:
+        return f"http://127.0.0.1:{explicit_port}"
+
+    preferred_ports = RUNTIME_DEFAULT_PORTS.get(runtime, RUNTIME_DEFAULT_PORTS["generic"])
+    port_lines = docker_port_lines(container)
+    for preferred in preferred_ports:
+        for line in port_lines:
+            match = re.match(rf"{preferred}/tcp\s+->\s+(.+):(\d+)$", line)
+            if match:
+                host = match.group(1).strip()
+                port = match.group(2).strip()
+                if host in ("0.0.0.0", "::"):
+                    host = "127.0.0.1"
+                return f"http://{host}:{port}"
+    for line in port_lines:
+        match = re.match(r".+\s+->\s+(.+):(\d+)$", line)
+        if match:
+            host = match.group(1).strip()
+            port = match.group(2).strip()
+            if host in ("0.0.0.0", "::"):
+                host = "127.0.0.1"
+            return f"http://{host}:{port}"
+
+    container_ip = get_container_ip(container)
+    if container_ip:
+        return f"http://{container_ip}:{preferred_ports[0]}"
+    return ""
 
 
 def parse_ollama_ps(ps_text: str) -> List[ModelRow]:
@@ -429,10 +535,6 @@ def parse_ollama_ps(ps_text: str) -> List[ModelRow]:
     return rows
 
 
-def get_ollama_ps(container: str) -> str:
-    return run_cmd(["docker", "exec", container, "ollama", "ps"], timeout=8.0)
-
-
 def get_ollama_ps_result(container: str) -> Tuple[str, str]:
     result = run_cmd_result(["docker", "exec", container, "ollama", "ps"], timeout=8.0)
     if result.timed_out:
@@ -445,27 +547,131 @@ def get_ollama_ps_result(container: str) -> Tuple[str, str]:
     return result.stdout, ""
 
 
-def resolve_ollama_containers(preferred: str) -> Tuple[List[str], Optional[str]]:
-    """
-    Returns (container_names, resolution_message).
-    If a specific running container is requested, use only that one.
-    Otherwise discover all running Ollama containers.
-    """
-    if preferred and preferred not in ("ollama", "auto", "*") and container_exists(preferred):
+def fetch_json(url: str, timeout: float = 5.0) -> Tuple[Optional[Dict[str, Any]], str]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+        payload = json.loads(body)
+        if isinstance(payload, dict):
+            return payload, ""
+        return None, f"unexpected JSON payload from {url}"
+    except urllib.error.HTTPError as exc:
+        return None, f"http {exc.code} for {url}"
+    except urllib.error.URLError as exc:
+        return None, f"http request failed for {url}: {exc.reason}"
+    except json.JSONDecodeError:
+        return None, f"invalid JSON from {url}"
+
+
+def fetch_text(url: str, timeout: float = 5.0) -> Tuple[str, str]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+        return body, ""
+    except urllib.error.HTTPError as exc:
+        return "", f"http {exc.code} for {url}"
+    except urllib.error.URLError as exc:
+        return "", f"http request failed for {url}: {exc.reason}"
+
+
+def probe_runtime_endpoints(
+    runtime: str,
+    container: str,
+    api_base_url: str,
+    runtime_port: int,
+) -> Tuple[str, bool, str, bool, str, int]:
+    if runtime not in {"vllm", "sglang"}:
+        base_url = detect_container_api_base(container, runtime, api_base_url, runtime_port)
+        return base_url, False, "", False, "", 0
+
+    base_url = detect_container_api_base(container, runtime, api_base_url, runtime_port)
+    if not base_url:
+        return "", False, f"could not resolve API endpoint for {runtime} in {container}", False, "", 0
+
+    _, health_error = fetch_text(f"{base_url}/health", timeout=5.0)
+    health_ok = not bool(health_error)
+
+    metrics_text, metrics_error = fetch_text(f"{base_url}/metrics", timeout=5.0)
+    metrics_ok = not bool(metrics_error)
+    metrics_samples = 0
+    if metrics_ok:
+        metrics_samples = sum(
+            1 for line in metrics_text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+    return base_url, health_ok, health_error, metrics_ok, metrics_error, metrics_samples
+
+
+def parse_openai_models_payload(payload: Dict[str, Any], runtime: str) -> List[ModelRow]:
+    rows: List[ModelRow] = []
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return rows
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        model_name = str(item.get("id") or item.get("root") or item.get("name") or "unknown")
+        owned_by = str(item.get("owned_by") or runtime)
+        max_ctx = item.get("max_model_len") or item.get("context_length") or item.get("max_context_length") or ""
+        rows.append(ModelRow(
+            name=model_name,
+            ctx=str(max_ctx) if max_ctx else "",
+            size=str(item.get("size") or item.get("object") or ""),
+            processor_raw=f"{runtime} api",
+            ctx_pct="",
+            device_mix=owned_by,
+            until="",
+            model_id=model_name,
+        ))
+    return rows
+
+
+def get_runtime_models_result(
+    runtime: str,
+    container: str,
+    api_base_url: str,
+    runtime_port: int,
+) -> Tuple[List[ModelRow], str]:
+    if runtime == "ollama":
+        ps_text, ps_error = get_ollama_ps_result(container)
+        if ps_error:
+            return [], ps_error
+        return parse_ollama_ps(ps_text), ""
+
+    if runtime in OPENAI_COMPATIBLE_RUNTIMES:
+        base_url = detect_container_api_base(container, runtime, api_base_url, runtime_port)
+        if not base_url:
+            return [], f"could not resolve API endpoint for {runtime} in {container}"
+        payload, err = fetch_json(f"{base_url}/v1/models", timeout=5.0)
+        if err:
+            return [], err
+        return parse_openai_models_payload(payload or {}, runtime), ""
+
+    return [], ""
+
+
+def resolve_runtime_containers(runtime: str, preferred: str, image_match: str) -> Tuple[List[str], Optional[str]]:
+    auto_targets = {"auto", "*"}
+    if runtime == "ollama":
+        auto_targets.add("ollama")
+
+    if preferred and preferred not in auto_targets and container_exists(preferred):
         return [preferred], None
 
-    candidates, discovery_error = list_running_ollama_containers()
+    candidates, discovery_error = list_running_containers(runtime, image_match)
+    runtime_label = runtime.upper()
     if not candidates:
         if discovery_error:
             return [preferred], discovery_error
-        if preferred and preferred not in ("ollama", "auto", "*"):
-            return [preferred], f"Requested OLLAMA container '{preferred}' is not running; monitoring will likely show errors."
-        return [preferred], f"No running Ollama containers found for requested target '{preferred}'."
+        if preferred and preferred not in auto_targets:
+            return [preferred], f"Requested {runtime_label} container '{preferred}' is not running; monitoring will likely show errors."
+        return [preferred], f"No running {runtime_label} containers found for requested target '{preferred}'."
 
-    if preferred and preferred not in ("ollama", "auto", "*") and not container_exists(preferred):
-        return candidates, f"Requested OLLAMA container '{preferred}' is not running; discovered {len(candidates)} running Ollama container(s) instead."
+    if preferred and preferred not in auto_targets and not container_exists(preferred):
+        return candidates, f"Requested {runtime_label} container '{preferred}' is not running; discovered {len(candidates)} running {runtime_label} container(s) instead."
 
-    return candidates, f"Auto-discovered {len(candidates)} running Ollama container(s)."
+    match_hint = image_match if image_match else "default image match"
+    return candidates, f"Auto-discovered {len(candidates)} running {runtime_label} container(s) using {match_hint}."
 
 
 # Precise GPU/CUDA OOM patterns — requires explicit CUDA/GPU context to avoid
@@ -534,32 +740,56 @@ def detect_oom_from_logs_result(container: str, since_utc_iso: str, max_lines: i
 # -------------------------
 # Async snapshot collectors
 # -------------------------
-def collect_container(container: str, since_iso: str) -> ContainerReport:
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+def collect_container(
+    runtime: str,
+    container: str,
+    since_iso: str,
+    api_base_url: str,
+    runtime_port: int,
+) -> ContainerReport:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         f_cont = pool.submit(get_container_stats, container)
-        f_ps = pool.submit(get_ollama_ps_result, container)
+        f_models = pool.submit(get_runtime_models_result, runtime, container, api_base_url, runtime_port)
         f_oom = pool.submit(detect_oom_from_logs_result, container, since_iso)
+        f_runtime = pool.submit(probe_runtime_endpoints, runtime, container, api_base_url, runtime_port)
 
         cont, stats_error = f_cont.result()
-        ps_text, ps_error = f_ps.result()
+        models, ps_error = f_models.result()
         oom, oom_line, oom_error = f_oom.result()
-        models = parse_ollama_ps(ps_text)
+        resolved_api_base, runtime_health_ok, runtime_health_error, runtime_metrics_ok, runtime_metrics_error, runtime_metrics_samples = f_runtime.result()
 
     status = "ok"
-    errors = [err for err in [stats_error, ps_error, oom_error] if err]
+    errors = [
+        err for err in [
+            stats_error,
+            ps_error,
+            oom_error,
+            runtime_health_error,
+            runtime_metrics_error,
+        ] if err
+    ]
     error = " | ".join(errors)
     if stats_error or ps_error:
+        status = "error"
+    elif runtime in {"vllm", "sglang"} and runtime_health_error:
         status = "error"
     elif not models:
         status = "idle"
 
     return ContainerReport(
         name=container,
+        runtime=runtime,
+        api_base_url=resolved_api_base,
         stats=cont,
         models=models,
         oom_detected=oom,
         oom_line=oom_line,
         status=status,
+        runtime_health_ok=runtime_health_ok,
+        runtime_health_error=runtime_health_error,
+        runtime_metrics_ok=runtime_metrics_ok,
+        runtime_metrics_error=runtime_metrics_error,
+        runtime_metrics_samples=runtime_metrics_samples,
         stats_error=stats_error,
         ps_error=ps_error,
         oom_error=oom_error,
@@ -568,12 +798,23 @@ def collect_container(container: str, since_iso: str) -> ContainerReport:
 
 
 def collect_all(
-    containers: List[str], since_by_container: Dict[str, str]
+    runtime: str,
+    containers: List[str],
+    since_by_container: Dict[str, str],
+    api_base_url: str,
+    runtime_port: int,
 ) -> Tuple[List[GpuSnap], List[ContainerReport]]:
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(containers) + 1)) as pool:
         f_gpu = pool.submit(get_gpus)
         futures = [
-            pool.submit(collect_container, container, since_by_container.get(container, iso_utc(time.time() - 2.0)))
+            pool.submit(
+                collect_container,
+                runtime,
+                container,
+                since_by_container.get(container, iso_utc(time.time() - 2.0)),
+                api_base_url,
+                runtime_port,
+            )
             for container in containers
         ]
         gpus = f_gpu.result()
@@ -589,7 +830,7 @@ CSV_HEADER = [
     "host_ts","gpu_id","gpu_name","gpu_uuid","nv_ts",
     "gpu_util_pct","gpu_mem_util_pct","gpu_mem_used_MiB","gpu_mem_total_MiB","gpu_power_W","gpu_temp_C","gpu_sm_clock_MHz",
     # container + model
-    "container_name","container_status","container_error",
+    "container_name","container_runtime","container_status","container_error",
     "model_name","model_id","model_size","model_processor_raw","model_context_pct","model_device_mix","model_context_tokens","model_until",
     # container
     "container_cpu_pct","container_mem_used","container_mem_limit","container_mem_pct","container_net_in","container_net_out","container_blk_in","container_blk_out","container_pids",
@@ -638,6 +879,7 @@ def env_truthy(name: str, default: str = "0") -> bool:
 
 def parse_args(argv: Optional[List[str]] = None) -> AppConfig:
     shared = argparse.ArgumentParser(add_help=False)
+    runtime_choices = ["ollama", "vllm", "sglang", "localai", "docker-model-runner", "generic"]
     shared.add_argument(
         "--log-file",
         default=os.environ.get("LOG_FILE", "ollama_gpu_per_model_log.csv"),
@@ -665,9 +907,31 @@ def parse_args(argv: Optional[List[str]] = None) -> AppConfig:
         help="Collection interval in seconds. Env fallback: INTERVAL_S.",
     )
     shared.add_argument(
+        "--runtime",
+        choices=runtime_choices,
+        default=normalize_runtime(os.environ.get("MONITOR_RUNTIME", "ollama")),
+        help="Target runtime adapter. Env fallback: MONITOR_RUNTIME.",
+    )
+    shared.add_argument(
         "--container",
-        default=os.environ.get("OLLAMA_CONTAINER", "ollama").strip(),
-        help="Specific Ollama container name, or auto/ollama/* for discovery. Env fallback: OLLAMA_CONTAINER.",
+        default=os.environ.get("CONTAINER_NAME", os.environ.get("OLLAMA_CONTAINER", "ollama")).strip(),
+        help="Specific container name, or auto/* for discovery. Ollama also accepts 'ollama'. Env fallback: CONTAINER_NAME then OLLAMA_CONTAINER.",
+    )
+    shared.add_argument(
+        "--image-match",
+        default=os.environ.get("IMAGE_MATCH", "").strip(),
+        help="Optional comma-separated docker image substring match for discovery. Env fallback: IMAGE_MATCH.",
+    )
+    shared.add_argument(
+        "--api-base-url",
+        default=os.environ.get("API_BASE_URL", "").strip(),
+        help="Optional base URL for model API introspection, for example http://127.0.0.1:8000. Env fallback: API_BASE_URL.",
+    )
+    shared.add_argument(
+        "--runtime-port",
+        type=int,
+        default=int(os.environ.get("RUNTIME_PORT", "0")),
+        help="Optional host port override for model API introspection. Env fallback: RUNTIME_PORT.",
     )
     shared.add_argument(
         "--ansi",
@@ -694,7 +958,7 @@ def parse_args(argv: Optional[List[str]] = None) -> AppConfig:
     )
 
     parser = argparse.ArgumentParser(
-        description="Monitor GPU, Ollama containers, loaded models, and OOM signals.",
+        description="Monitor GPU, AI runtime containers, loaded models, and OOM signals.",
     )
     subparsers = parser.add_subparsers(dest="command")
     serve_parser = subparsers.add_parser(
@@ -720,6 +984,8 @@ def parse_args(argv: Optional[List[str]] = None) -> AppConfig:
     args = parser.parse_args(args_list)
     if args.interval <= 0:
         raise SystemExit("ERROR: --interval must be greater than 0")
+    if args.runtime_port < 0 or args.runtime_port > 65535:
+        raise SystemExit("ERROR: --runtime-port must be between 0 and 65535")
     if not (1 <= args.metrics_http_port <= 65535):
         raise SystemExit("ERROR: --metrics-http-port must be between 1 and 65535")
 
@@ -738,13 +1004,18 @@ def parse_args(argv: Optional[List[str]] = None) -> AppConfig:
         metrics_http_host=args.metrics_http_host,
         metrics_http_port=args.metrics_http_port,
         interval_s=args.interval,
+        runtime=args.runtime,
         requested_container=args.container,
+        image_match=args.image_match,
+        api_base_url=args.api_base_url,
+        runtime_port=args.runtime_port,
         ansi_enabled=ansi_enabled,
     )
 
 
 def build_json_payload(
     host_ts: str,
+    runtime: str,
     requested_container: str,
     resolution_msg: Optional[str],
     gpus: List[GpuSnap],
@@ -752,6 +1023,7 @@ def build_json_payload(
 ) -> Dict[str, Any]:
     return {
         "host_ts": host_ts,
+        "runtime": runtime,
         "requested_container": requested_container,
         "discovery_message": resolution_msg,
         "gpus": [
@@ -773,11 +1045,18 @@ def build_json_payload(
         "containers": [
             {
                 "name": report.name,
+                "runtime": report.runtime,
+                "api_base_url": report.api_base_url,
                 "status": report.status,
                 "error": report.error,
                 "stats_error": report.stats_error,
                 "ps_error": report.ps_error,
                 "oom_error": report.oom_error,
+                "runtime_health_ok": report.runtime_health_ok,
+                "runtime_health_error": report.runtime_health_error,
+                "runtime_metrics_ok": report.runtime_metrics_ok,
+                "runtime_metrics_error": report.runtime_metrics_error,
+                "runtime_metrics_samples": report.runtime_metrics_samples,
                 "oom_detected": report.oom_detected,
                 "oom_line": report.oom_line,
                 "stats": {
@@ -902,6 +1181,18 @@ def to_error_type(value: str) -> str:
         return "container_not_found"
     if "container_not_running" in normalized:
         return "container_not_running"
+    if "could_not_resolve_api_endpoint" in normalized:
+        return "api_endpoint_unresolved"
+    if "http_request_failed" in normalized:
+        return "api_request_failed"
+    if normalized.startswith("http_"):
+        return "api_http_error"
+    if "invalid_json" in normalized:
+        return "api_invalid_json"
+    if "runtime_health" in normalized:
+        return "runtime_health_error"
+    if "runtime_metrics" in normalized:
+        return "runtime_metrics_error"
     if "ollama_ps_timed_out" in normalized:
         return "ollama_ps_timed_out"
     if "ollama_ps_failed" in normalized:
@@ -961,6 +1252,12 @@ def build_prometheus_text(gpus: List[GpuSnap], reports: List[ContainerReport]) -
         "# TYPE gpu_monitor_container_models_loaded gauge",
         "# HELP gpu_monitor_container_oom_detected Whether OOM was detected in recent logs.",
         "# TYPE gpu_monitor_container_oom_detected gauge",
+        "# HELP gpu_monitor_runtime_health_up Runtime health endpoint state for the container.",
+        "# TYPE gpu_monitor_runtime_health_up gauge",
+        "# HELP gpu_monitor_runtime_metrics_up Runtime metrics endpoint state for the container.",
+        "# TYPE gpu_monitor_runtime_metrics_up gauge",
+        "# HELP gpu_monitor_runtime_metrics_samples Number of non-comment samples returned by the runtime metrics endpoint.",
+        "# TYPE gpu_monitor_runtime_metrics_samples gauge",
         "# HELP gpu_monitor_container_error_state Container error state by source and error type.",
         "# TYPE gpu_monitor_container_error_state gauge",
         "# HELP gpu_monitor_model_loaded Whether a model is currently loaded in the container.",
@@ -975,7 +1272,10 @@ def build_prometheus_text(gpus: List[GpuSnap], reports: List[ContainerReport]) -
         "# TYPE gpu_monitor_model_until_seconds gauge",
     ])
     for report in reports:
-        labels = f'container_name="{prom_sanitize_label_value(report.name)}"'
+        labels = (
+            f'container_name="{prom_sanitize_label_value(report.name)}",'
+            f'runtime="{prom_sanitize_label_value(report.runtime)}"'
+        )
         status_value = 1 if report.status == "ok" else 0 if report.status == "idle" else -1
         lines.append(f"gpu_monitor_container_status{{{labels}}} {status_value}")
         for metric_name, metric_value in {
@@ -984,19 +1284,25 @@ def build_prometheus_text(gpus: List[GpuSnap], reports: List[ContainerReport]) -
             "gpu_monitor_container_pids": parse_metric_number(report.stats.pids),
             "gpu_monitor_container_models_loaded": float(len(report.models)),
             "gpu_monitor_container_oom_detected": 1.0 if report.oom_detected else 0.0,
+            "gpu_monitor_runtime_health_up": 1.0 if report.runtime_health_ok else 0.0,
+            "gpu_monitor_runtime_metrics_up": 1.0 if report.runtime_metrics_ok else 0.0,
+            "gpu_monitor_runtime_metrics_samples": float(report.runtime_metrics_samples),
         }.items():
             if metric_value is not None:
                 lines.append(f"{metric_name}{{{labels}}} {metric_value}")
 
         error_sources = {
             "stats": report.stats_error,
-            "ps": report.ps_error,
+            "models": report.ps_error,
             "oom": report.oom_error,
+            "runtime_health": report.runtime_health_error,
+            "runtime_metrics": report.runtime_metrics_error,
         }
         for source, error_text in error_sources.items():
             error_type = to_error_type(error_text)
             error_labels = (
                 f'container_name="{prom_sanitize_label_value(report.name)}",'
+                f'runtime="{prom_sanitize_label_value(report.runtime)}",'
                 f'source="{prom_sanitize_label_value(source)}",'
                 f'error_type="{prom_sanitize_label_value(error_type)}"'
             )
@@ -1007,6 +1313,7 @@ def build_prometheus_text(gpus: List[GpuSnap], reports: List[ContainerReport]) -
         for model in report.models:
             model_labels = (
                 f'container_name="{prom_sanitize_label_value(report.name)}",'
+                f'runtime="{prom_sanitize_label_value(report.runtime)}",'
                 f'model_name="{prom_sanitize_label_value(model.name)}",'
                 f'model_id="{prom_sanitize_label_value(model.model_id)}",'
                 f'device_mix="{prom_sanitize_label_value(model.device_mix)}"'
@@ -1039,6 +1346,7 @@ def write_prometheus_snapshot(path: str, gpus: List[GpuSnap], reports: List[Cont
 
 def build_health_payload(
     host_ts: str,
+    runtime: str,
     requested_container: str,
     resolution_msg: Optional[str],
     reports: List[ContainerReport],
@@ -1049,6 +1357,7 @@ def build_health_payload(
     overall_status = "ok" if error_count == 0 else "degraded"
     return {
         "host_ts": host_ts,
+        "runtime": runtime,
         "requested_container": requested_container,
         "discovery_message": resolution_msg,
         "status": overall_status,
@@ -1059,8 +1368,12 @@ def build_health_payload(
         "containers": [
             {
                 "name": report.name,
+                "runtime": report.runtime,
+                "api_base_url": report.api_base_url,
                 "status": report.status,
                 "error": report.error,
+                "runtime_health_ok": report.runtime_health_ok,
+                "runtime_metrics_ok": report.runtime_metrics_ok,
             }
             for report in reports
         ],
@@ -1069,21 +1382,25 @@ def build_health_payload(
 
 def build_ready_payload(
     host_ts: str,
+    runtime: str,
     requested_container: str,
     resolution_msg: Optional[str],
     reports: List[ContainerReport],
 ) -> Tuple[int, Dict[str, Any]]:
     usable_count = sum(1 for report in reports if report.status in ("ok", "idle"))
     error_count = sum(1 for report in reports if report.status == "error")
+    health_ok_count = sum(1 for report in reports if report.runtime_health_ok)
     ready = usable_count > 0
     status_code = 200 if ready else 503
     payload = {
         "host_ts": host_ts,
+        "runtime": runtime,
         "requested_container": requested_container,
         "discovery_message": resolution_msg,
         "ready": ready,
         "usable_containers": usable_count,
         "error_containers": error_count,
+        "runtime_health_ok_containers": health_ok_count,
         "containers_total": len(reports),
     }
     return status_code, payload
@@ -1172,7 +1489,11 @@ def main() -> int:
     metrics_http_host = config.metrics_http_host
     metrics_http_port = config.metrics_http_port
     interval_s = config.interval_s
+    runtime = config.runtime
     requested_container = config.requested_container
+    image_match = config.image_match
+    api_base_url = config.api_base_url
+    runtime_port = config.runtime_port
     A = ANSI(config.ansi_enabled)
     shared_state = SharedSnapshotState(lock=threading.Lock())
     http_server: Optional[ThreadingHTTPServer] = None
@@ -1181,7 +1502,7 @@ def main() -> int:
     which_or_die("docker")
     which_or_die("nvidia-smi")
 
-    containers, resolution_msg = resolve_ollama_containers(requested_container)
+    containers, resolution_msg = resolve_runtime_containers(runtime, requested_container, image_match)
     if "csv" in output_modes:
         ensure_csv_header(log_file)
 
@@ -1199,7 +1520,7 @@ def main() -> int:
             print(f"Health HTTP : http://{metrics_http_host}:{metrics_http_port}/health")
             print(f"Ready HTTP  : http://{metrics_http_host}:{metrics_http_port}/ready")
             print(f"Snapshot HTTP: http://{metrics_http_host}:{metrics_http_port}/snapshot")
-        print(f"Interval: {interval_s}s | Target: {requested_container}")
+        print(f"Interval: {interval_s}s | Runtime: {runtime} | Target: {requested_container}")
         print(f"Command: {config.command}")
         if resolution_msg:
             print(resolution_msg)
@@ -1215,7 +1536,7 @@ def main() -> int:
         while True:
             host_ts = now_local_str()
             tick_started_ts = time.time()
-            containers, resolution_msg = resolve_ollama_containers(requested_container)
+            containers, resolution_msg = resolve_runtime_containers(runtime, requested_container, image_match)
             for container in containers:
                 last_log_check_ts.setdefault(container, tick_started_ts - max(2.0, interval_s))
 
@@ -1223,7 +1544,7 @@ def main() -> int:
                 container: iso_utc(last_log_check_ts.get(container, tick_started_ts - max(2.0, interval_s)))
                 for container in containers
             }
-            gpus, reports = collect_all(containers, since_by_container)
+            gpus, reports = collect_all(runtime, containers, since_by_container, api_base_url, runtime_port)
             for container in containers:
                 # Advance the next log cursor to the start of this tick so logs emitted
                 # while collectors are still running are re-scanned instead of skipped.
@@ -1237,6 +1558,7 @@ def main() -> int:
             print(f"{A.CYAN}{A.BOLD}║        GPU / LLM / CONTAINER OBSERVABILITY (PY)              ║{A.RESET}")
             print(f"{A.CYAN}{A.BOLD}╚══════════════════════════════════════════════════════════════╝{A.RESET}")
             print(f"{A.GRAY}Time{A.RESET}          : {A.BOLD}{host_ts}{A.RESET}")
+            print(f"{A.GRAY}Runtime{A.RESET}       : {runtime}")
             if resolution_msg:
                 print(f"{A.GRAY}Discovery{A.RESET}     : {resolution_msg}")
             oom_reports = [r for r in reports if r.oom_detected]
@@ -1266,18 +1588,29 @@ def main() -> int:
             print()
 
             csv_rows: List[List[str]] = []
-            print(f"{A.MAGENTA}{A.BOLD}OLLAMA CONTAINERS{A.RESET} {A.GRAY}(one row per model per container; Grafana/Postgres ready){A.RESET}")
+            print(f"{A.MAGENTA}{A.BOLD}{runtime.upper()} CONTAINERS{A.RESET} {A.GRAY}(one row per model per container; Grafana/Postgres ready){A.RESET}")
             for report in reports:
                 cont = report.stats
                 status_color = A.GREEN if report.status == "ok" else A.YELLOW if report.status == "idle" else A.RED
                 print(f"{A.GRAY}{'─'*94}{A.RESET}")
-                print(f"{A.MAGENTA}{A.BOLD}CONTAINER ({report.name}){A.RESET}  status={status_color}{report.status}{A.RESET}")
+                print(f"{A.MAGENTA}{A.BOLD}CONTAINER ({report.name}){A.RESET}  runtime={report.runtime} status={status_color}{report.status}{A.RESET}")
                 if report.stats_error:
                     print(f"  Stats Error : {A.RED}{report.stats_error}{A.RESET}")
                 if report.ps_error:
-                    print(f"  PS Error    : {A.RED}{report.ps_error}{A.RESET}")
+                    print(f"  Model Error : {A.RED}{report.ps_error}{A.RESET}")
+                if report.runtime_health_error:
+                    print(f"  Health Err  : {A.RED}{report.runtime_health_error}{A.RESET}")
+                if report.runtime_metrics_error:
+                    print(f"  Metrics Err : {A.RED}{report.runtime_metrics_error}{A.RESET}")
                 if report.oom_error:
                     print(f"  OOM Error   : {A.RED}{report.oom_error}{A.RESET}")
+                if report.api_base_url:
+                    print(f"  API Base    : {A.GRAY}{report.api_base_url}{A.RESET}")
+                if report.runtime in {'vllm', 'sglang'}:
+                    health_label = "up" if report.runtime_health_ok else "down"
+                    metrics_label = f"up ({report.runtime_metrics_samples} samples)" if report.runtime_metrics_ok else "down"
+                    print(f"  Health      : {A.CYAN}{health_label}{A.RESET}")
+                    print(f"  Metrics     : {A.CYAN}{metrics_label}{A.RESET}")
                 print(f"  CPU         : {A.CYAN}{format_container_cpu(cont.cpu_pct)}{A.RESET}")
                 print(f"  RAM         : {A.CYAN}{cont.mem_used or '-'} / {cont.mem_limit or '-'}{A.RESET} ({A.YELLOW}{cont.mem_pct or '-'} %{A.RESET})")
                 print(f"  Net I/O     : {A.GRAY}{cont.net_in or '-'} / {cont.net_out or '-'}{A.RESET}")
@@ -1301,7 +1634,7 @@ def main() -> int:
                         csv_rows.append([
                             host_ts, gpu.gpu_id, gpu.gpu_name, gpu.gpu_uuid, gpu.nv_ts,
                             gpu.util_pct, gpu.mem_util_pct, gpu.mem_used_mib, gpu.mem_total_mib, gpu.power_w, gpu.temp_c, gpu.sm_clock_mhz,
-                            report.name, report.status, report.error,
+                            report.name, report.runtime, report.status, report.error,
                             model_label, "", "", "", "0%/100%", "", "0", report.status,
                             cont.cpu_pct, cont.mem_used, cont.mem_limit, cont.mem_pct, cont.net_in, cont.net_out, cont.blk_in, cont.blk_out, cont.pids,
                             "1" if report.oom_detected else "0", report.oom_line[:500],
@@ -1322,7 +1655,7 @@ def main() -> int:
                         csv_rows.append([
                             host_ts, gpu.gpu_id, gpu.gpu_name, gpu.gpu_uuid, gpu.nv_ts,
                             gpu.util_pct, gpu.mem_util_pct, gpu.mem_used_mib, gpu.mem_total_mib, gpu.power_w, gpu.temp_c, gpu.sm_clock_mhz,
-                            report.name, report.status, report.error,
+                            report.name, report.runtime, report.status, report.error,
                             m.name, m.model_id, m.size, m.processor_raw, m.ctx_pct, m.device_mix, m.ctx, m.until,
                             cont.cpu_pct, cont.mem_used, cont.mem_limit, cont.mem_pct, cont.net_in, cont.net_out, cont.blk_in, cont.blk_out, cont.pids,
                             "1" if report.oom_detected else "0", report.oom_line[:500],
@@ -1331,10 +1664,10 @@ def main() -> int:
             print(f"{A.GRAY}{'─'*94}{A.RESET}")
             print(f"{A.GRAY}Next tick in {interval_s}s{A.RESET}")
 
-            json_payload = build_json_payload(host_ts, requested_container, resolution_msg, gpus, reports)
+            json_payload = build_json_payload(host_ts, runtime, requested_container, resolution_msg, gpus, reports)
             prom_text = build_prometheus_text(gpus, reports)
-            health_payload = build_health_payload(host_ts, requested_container, resolution_msg, reports)
-            ready_status_code, ready_payload = build_ready_payload(host_ts, requested_container, resolution_msg, reports)
+            health_payload = build_health_payload(host_ts, runtime, requested_container, resolution_msg, reports)
+            ready_status_code, ready_payload = build_ready_payload(host_ts, runtime, requested_container, resolution_msg, reports)
             ready_payload["status_code"] = ready_status_code
             with shared_state.lock:
                 shared_state.prometheus_text = prom_text
