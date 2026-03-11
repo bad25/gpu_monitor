@@ -206,8 +206,9 @@ scrape_configs:
 ## Files
 
 - [`gpu_monitor.py`](./gpu_monitor.py): main monitor
-- [`gpu_monitor.md`](./gpu_monitor.md): older detailed reference, mostly Ollama-oriented
-- [`README_GPU_MONITOR_EN.md`](./README_GPU_MONITOR_EN.md): English Ollama quick start
-- [`README_GPU_MONITOR_ID.md`](./README_GPU_MONITOR_ID.md): Indonesian Ollama quick start
+- [`CHANGELOG.md`](./CHANGELOG.md): official release history
+- [`gpu_monitor.md`](./gpu_monitor.md): detailed reference
+- [`README_GPU_MONITOR_EN.md`](./README_GPU_MONITOR_EN.md): English quick start
+- [`README_GPU_MONITOR_ID.md`](./README_GPU_MONITOR_ID.md): Indonesian quick start
 - [`gpu_monitor_v1.sh`](./gpu_monitor_v1.sh): older shell version
 - [`gpu_monitor_v2.sh`](./gpu_monitor_v2.sh): newer shell version
