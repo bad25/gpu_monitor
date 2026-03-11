@@ -8,6 +8,21 @@ The format is based on Keep a Changelog, and this project uses Semantic Versioni
 
 No unreleased changes yet.
 
+## [1.0.4] - 2026-03-11
+
+### Changed
+
+- Added the official `CHANGELOG.md` file to the repository.
+- Linked the changelog from `README.md`.
+- Aligned the documented release history with the published tags and releases.
+
+## [1.0.3] - 2026-03-11
+
+### Changed
+
+- Follow-up patch release for changelog and release-history cleanup.
+- Published release metadata for the changelog update line.
+
 ## [1.0.2] - 2026-03-11
 
 ### Changed
