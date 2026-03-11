@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Generated monitor outputs
+ollama_gpu_per_model_log.csv
+ollama_gpu_per_model.prom
+ollama_gpu_per_model_snapshot.json
+
+# Local OS/editor files
+.DS_Store
+Thumbs.db

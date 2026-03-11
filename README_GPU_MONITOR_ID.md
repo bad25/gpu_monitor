@@ -1,8 +1,8 @@
 # GPU Monitor
 
-Quick start untuk [gpu_monitor.py](/home/srwd/gpu_monitor.py).
+Quick start untuk [gpu_monitor.py](./gpu_monitor.py).
 
-Dokumentasi lengkap ada di [gpu_monitor.md](/home/srwd/gpu_monitor.md).
+Dokumentasi lengkap ada di [gpu_monitor.md](./gpu_monitor.md).
 
 ## Fungsi
 
@@ -32,7 +32,7 @@ Fitur utama:
 Jalankan monitor terus-menerus:
 
 ```bash
-python3 /home/srwd/gpu_monitor.py serve \
+python3 gpu_monitor.py serve \
   --output-mode all \
   --metrics-http \
   --interval 2 \
@@ -42,7 +42,7 @@ python3 /home/srwd/gpu_monitor.py serve \
 Ambil satu snapshot lalu keluar:
 
 ```bash
-python3 /home/srwd/gpu_monitor.py snapshot \
+python3 gpu_monitor.py snapshot \
   --output-mode json \
   --container auto
 ```
@@ -50,9 +50,9 @@ python3 /home/srwd/gpu_monitor.py snapshot \
 Lihat help:
 
 ```bash
-python3 /home/srwd/gpu_monitor.py --help
-python3 /home/srwd/gpu_monitor.py serve --help
-python3 /home/srwd/gpu_monitor.py snapshot --help
+python3 gpu_monitor.py --help
+python3 gpu_monitor.py serve --help
+python3 gpu_monitor.py snapshot --help
 ```
 
 ## Output
@@ -100,7 +100,7 @@ Jika `--metrics-http` aktif, default endpoint:
 Target satu container tertentu:
 
 ```bash
-python3 /home/srwd/gpu_monitor.py serve \
+python3 gpu_monitor.py serve \
   --container ollama-chat \
   --output-mode csv,prometheus
 ```
@@ -108,7 +108,7 @@ python3 /home/srwd/gpu_monitor.py serve \
 HTTP exporter saja:
 
 ```bash
-python3 /home/srwd/gpu_monitor.py serve \
+python3 gpu_monitor.py serve \
   --output-mode prometheus \
   --metrics-http
 ```
@@ -141,8 +141,8 @@ Requires=docker.service
 [Service]
 Type=simple
 User=srwd
-WorkingDirectory=/home/srwd
-ExecStart=/usr/bin/python3 /home/srwd/gpu_monitor.py serve --output-mode all --metrics-http --metrics-http-host 127.0.0.1 --metrics-http-port 9464 --interval 2 --container auto
+WorkingDirectory=/opt/gpu_monitor
+ExecStart=/usr/bin/python3 /opt/gpu_monitor/gpu_monitor.py serve --output-mode all --metrics-http --metrics-http-host 127.0.0.1 --metrics-http-port 9464 --interval 2 --container auto
 Restart=always
 RestartSec=5
 
@@ -161,5 +161,5 @@ sudo systemctl status gpu-monitor.service
 
 ## Referensi
 
-- Ringkasan lengkap: [gpu_monitor.md](/home/srwd/gpu_monitor.md)
-- Script: [gpu_monitor.py](/home/srwd/gpu_monitor.py)
+- Ringkasan lengkap: [gpu_monitor.md](./gpu_monitor.md)
+- Script: [gpu_monitor.py](./gpu_monitor.py)
